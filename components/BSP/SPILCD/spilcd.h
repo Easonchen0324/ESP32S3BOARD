@@ -84,6 +84,7 @@ typedef struct
 
 extern _spilcd_dev spilcddev;;
 extern esp_lcd_panel_handle_t panel_handle;
+extern esp_lcd_panel_io_handle_t lcd_io_handle;
 
 /* 函数声明 */
 esp_err_t spilcd_init(void);                /* spilcd初始化 */

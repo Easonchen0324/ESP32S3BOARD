@@ -23,6 +23,7 @@
 
 DRAM_ATTR uint8_t refresh_done_flag = 0;    
 esp_lcd_panel_handle_t panel_handle = NULL;
+esp_lcd_panel_io_handle_t lcd_io_handle = NULL;
 _spilcd_dev spilcddev;
 #define SPI_LCD_TYPE    1           /* SPI接口屏幕类型（1：2.4寸SPILCD  0：1.3寸SPILCD） */ 
 
@@ -54,7 +55,6 @@ esp_err_t spilcd_init(void)
     LCD_RST(1);
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    esp_lcd_panel_io_handle_t io_handle = NULL;     /* LCD IO设备句柄 */
     /* spi配置 */
     esp_lcd_panel_io_spi_config_t io_config = {
         .dc_gpio_num         = LCD_DC_PIN,          /* DC IO */
@@ -66,7 +66,7 @@ esp_err_t spilcd_init(void)
         .trans_queue_depth   = 7,                   /* 传输队列 */
     };
     /* 将LCD设备挂载至SPI总线上 */
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &io_handle));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &lcd_io_handle));
 
     spilcddev.pheight = spilcd_height;  /* 高度 */
     spilcddev.pwidth  = spilcd_width;   /* 宽度 */
@@ -79,7 +79,7 @@ esp_err_t spilcd_init(void)
         .data_endian    = LCD_RGB_DATA_ENDIAN_BIG,      /* 大端顺序 */
     };
     /* 为ST7789创建LCD面板句柄，并指定SPI IO设备句柄 */
-    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(io_handle, &panel_config, &panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(lcd_io_handle, &panel_config, &panel_handle));
     /* 复位LCD */
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     /* 反显 */
@@ -93,7 +93,7 @@ esp_err_t spilcd_init(void)
         .on_color_trans_done = notify_lcd_flush_ready,
     };
     /* 注册屏幕刷新完成回调函数 */
-    ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(io_handle, &cbs, NULL));
+    ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(lcd_io_handle, &cbs, NULL));
 
     spilcd_display_dir(1);      /* 横屏显示 */
     
@@ -627,4 +627,3 @@ void spilcd_show_string(uint16_t x, uint16_t y, uint16_t width, uint16_t height,
         p++;
     }
 }
-

@@ -25,6 +25,9 @@
 #include "my_spi.h"
 #include "spilcd.h"
 #include "xl9555.h"
+#include "lvgl.h"
+#include "lv_demos.h"
+#include "esp_lvgl_port.h"
 #include <stdio.h>
 
 
@@ -36,8 +39,6 @@
 void app_main(void)
 {
     esp_err_t ret;
-    uint8_t x = 0;
-
     ret = nvs_flash_init();     /* 初始化NVS */
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
@@ -50,83 +51,44 @@ void app_main(void)
     myiic_init();               /* IIC初始化 */  
     xl9555_init();              /* 初始化按键 */
     spilcd_init();              /* LCD屏初始化 */
- 
+
+    const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    ESP_ERROR_CHECK(lvgl_port_init(&lvgl_cfg));
+
+    const lvgl_port_display_cfg_t display_cfg = {
+        .io_handle = lcd_io_handle,
+        .panel_handle = panel_handle,
+        .control_handle = NULL,
+        .buffer_size = 320 * 40,
+        .double_buffer = true,
+        .trans_size = 0,
+        .hres = spilcddev.width,
+        .vres = spilcddev.height,
+        .monochrome = false,
+        .rotation = {
+            .swap_xy = true,
+            .mirror_x = true,
+            .mirror_y = false,
+        },
+        .rounder_cb = NULL,
+        .color_format = LV_COLOR_FORMAT_RGB565,
+        .flags = {
+            .buff_dma = true,
+            .buff_spiram = false,
+            .sw_rotate = false,
+            .swap_bytes = true,
+            .full_refresh = false,
+            .direct_mode = false,
+        },
+    };
+    lvgl_port_add_disp(&display_cfg);
+
+    lvgl_port_lock(0);
+    lv_demo_widgets();
+    lvgl_port_unlock();
+
     while (1)
     {
-        switch (x)
-        {
-            case 0:
-            {
-                spilcd_clear(WHITE);
-                break;
-            }
-            case 1:
-            {
-                spilcd_clear(BLACK);
-                break;
-            }
-            case 2:
-            {
-                spilcd_clear(BLUE);
-                break;
-            }
-            case 3:
-            {
-                spilcd_clear(RED);
-                break;
-            }
-            case 4:
-            {
-                spilcd_clear(MAGENTA);
-                break;
-            }
-            case 5:
-            {
-                spilcd_clear(GREEN);
-                break;
-            }
-            case 6:
-            {
-                spilcd_clear(CYAN);
-                break;
-            }
-            case 7:
-            {
-                spilcd_clear(YELLOW);
-                break;
-            }
-            case 8:
-            {
-                spilcd_clear(BRRED);
-                break;
-            }
-            case 9:
-            {
-                spilcd_clear(GRAY);
-                break;
-            }
-            case 10:
-            {
-                spilcd_clear(LGRAY);
-                break;
-            }
-            case 11:
-            {
-                spilcd_clear(BROWN);
-                break;
-            }
-        }
-
-        spilcd_show_string(10, 40, 240, 32, 32, "ESP32-S3", RED);
-        spilcd_show_string(10, 80, 240, 24, 24, "SPILCD TEST", RED);
-        spilcd_show_string(10, 110, 240, 16, 16, "ATOM@ALIENTEK", RED);
-        x++;
-
-        if (x == 12)
-        {
-            x = 0;
-        }
-
         LED0_TOGGLE();
         vTaskDelay(pdMS_TO_TICKS(500));
     }
