@@ -1,5 +1,7 @@
 #include "qspilcd.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
@@ -7,6 +9,7 @@
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_touch_ft5x06.h"
 #include "esp_lcd_tk018.h"
+#include "xl9555.h"
 
 #define QSPILCD_HOST              SPI3_HOST
 #define QSPILCD_PIN_PCLK          GPIO_NUM_6
@@ -64,6 +67,11 @@ esp_err_t qspilcd_init(void)
 
 esp_err_t qspilcd_touch_init(void)
 {
+    xl9555_pin_write(CT_RST_IO, 0);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    xl9555_pin_write(CT_RST_IO, 1);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
     i2c_master_bus_handle_t touch_i2c_bus = NULL;
     const i2c_master_bus_config_t i2c_config = {
         .i2c_port = QSPILCD_TOUCH_PORT,
@@ -76,6 +84,7 @@ esp_err_t qspilcd_touch_init(void)
     ESP_RETURN_ON_ERROR(i2c_new_master_bus(&i2c_config, &touch_i2c_bus), TAG, "initialize touch I2C bus failed");
 
     esp_lcd_panel_io_i2c_config_t touch_io_config = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
+    touch_io_config.dev_addr = 0x15;
     touch_io_config.scl_speed_hz = QSPILCD_TOUCH_FREQ_HZ;
     esp_lcd_panel_io_handle_t touch_io_handle = NULL;
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c(touch_i2c_bus, &touch_io_config, &touch_io_handle), TAG, "create touch IO failed");
