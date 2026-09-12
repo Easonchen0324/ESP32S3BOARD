@@ -15,15 +15,13 @@
 #define QSPILCD_PIN_PCLK          GPIO_NUM_6
 #define QSPILCD_PIN_CS            GPIO_NUM_16
 #define QSPILCD_PIN_DATA0         GPIO_NUM_15
-#define QSPILCD_PIN_DATA1         GPIO_NUM_7
-#define QSPILCD_PIN_DATA2         GPIO_NUM_17
-#define QSPILCD_PIN_DATA3         GPIO_NUM_18
+#define QSPILCD_PIN_DC            GPIO_NUM_7
 #define QSPILCD_PIN_BACKLIGHT     GPIO_NUM_35
 
 #define QSPILCD_TOUCH_PORT        I2C_NUM_1
 #define QSPILCD_TOUCH_PIN_SCL     GPIO_NUM_5
 #define QSPILCD_TOUCH_PIN_SDA     GPIO_NUM_4
-#define QSPILCD_TOUCH_FREQ_HZ     400000
+#define QSPILCD_TOUCH_FREQ_HZ     100000
 
 static const char *TAG = "qspilcd";
 static esp_lcd_panel_io_handle_t s_lcd_io_handle;
@@ -39,18 +37,17 @@ esp_err_t qspilcd_init(void)
     ESP_RETURN_ON_ERROR(gpio_config(&backlight_config), TAG, "configure backlight failed");
     ESP_RETURN_ON_ERROR(gpio_set_level(QSPILCD_PIN_BACKLIGHT, 0), TAG, "turn off backlight failed");
 
-    const spi_bus_config_t bus_config = SPD2010_PANEL_BUS_QSPI_CONFIG(
-        QSPILCD_PIN_PCLK, QSPILCD_PIN_DATA0, QSPILCD_PIN_DATA1,
-        QSPILCD_PIN_DATA2, QSPILCD_PIN_DATA3,
-        QSPILCD_H_RES * QSPILCD_DRAW_BUFF_HEIGHT * sizeof(uint16_t));
-    ESP_RETURN_ON_ERROR(spi_bus_initialize(QSPILCD_HOST, &bus_config, SPI_DMA_CH_AUTO), TAG, "initialize QSPI bus failed");
+    const spi_bus_config_t bus_config = SPD2010_PANEL_BUS_SPI_CONFIG(
+        QSPILCD_PIN_PCLK, QSPILCD_PIN_DATA0,
+        QSPILCD_H_RES * QSPILCD_V_RES * sizeof(uint16_t));
+    ESP_RETURN_ON_ERROR(spi_bus_initialize(QSPILCD_HOST, &bus_config, SPI_DMA_CH_AUTO), TAG, "initialize SPI bus failed");
 
     const esp_lcd_panel_io_spi_config_t io_config =
-        SPD2010_PANEL_IO_QSPI_CONFIG(QSPILCD_PIN_CS, NULL, NULL);
+        SPD2010_PANEL_IO_SPI_CONFIG(QSPILCD_PIN_CS, QSPILCD_PIN_DC, NULL, NULL);
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi(QSPILCD_HOST, &io_config, &s_lcd_io_handle), TAG, "create panel IO failed");
 
     const spd2010_vendor_config_t vendor_config = {
-        .flags.use_qspi_interface = 1,
+        .flags.use_qspi_interface = 0,
     };
     const esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = GPIO_NUM_NC,
@@ -83,8 +80,25 @@ esp_err_t qspilcd_touch_init(void)
     };
     ESP_RETURN_ON_ERROR(i2c_new_master_bus(&i2c_config, &touch_i2c_bus), TAG, "initialize touch I2C bus failed");
 
+    static const uint8_t touch_addresses[] = {0x15, 0x38};
+    uint8_t touch_address = 0;
+    for (size_t i = 0; i < sizeof(touch_addresses) / sizeof(touch_addresses[0]); i++)
+    {
+        if (i2c_master_probe(touch_i2c_bus, touch_addresses[i], 100) == ESP_OK)
+        {
+            touch_address = touch_addresses[i];
+            ESP_LOGI(TAG, "touch controller found at I2C address 0x%02X", touch_address);
+            break;
+        }
+    }
+    if (touch_address == 0)
+    {
+        ESP_LOGE(TAG, "touch controller not found at I2C addresses 0x15 or 0x38");
+        return ESP_ERR_NOT_FOUND;
+    }
+
     esp_lcd_panel_io_i2c_config_t touch_io_config = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
-    touch_io_config.dev_addr = 0x15;
+    touch_io_config.dev_addr = touch_address;
     touch_io_config.scl_speed_hz = QSPILCD_TOUCH_FREQ_HZ;
     esp_lcd_panel_io_handle_t touch_io_handle = NULL;
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c(touch_i2c_bus, &touch_io_config, &touch_io_handle), TAG, "create touch IO failed");

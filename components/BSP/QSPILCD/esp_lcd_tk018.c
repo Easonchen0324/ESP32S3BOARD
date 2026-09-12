@@ -374,6 +374,7 @@ static esp_err_t panel_spd2010_init(esp_lcd_panel_t *panel)
 
 static esp_err_t panel_spd2010_draw_bitmap(esp_lcd_panel_t *panel, int x_start, int y_start, int x_end, int y_end, const void *color_data)
 {
+    static uint8_t draw_log_count;
     spd2010_panel_t *spd2010 = __containerof(panel, spd2010_panel_t, base);
     assert((x_start < x_end) && (y_start < y_end) && "start position must be smaller than end position");
     esp_lcd_panel_io_handle_t io = spd2010->io;
@@ -398,6 +399,18 @@ static esp_err_t panel_spd2010_draw_bitmap(esp_lcd_panel_t *panel, int x_start, 
     }, 4), TAG, "send command failed");
     // transfer frame buffer
     size_t len = (x_end - x_start) * (y_end - y_start) * spd2010->fb_bits_per_pixel / 8;
+    if (draw_log_count == 1 && x_start == 0 && y_start == 0 &&
+        x_end == 240 && y_end == 300) {
+        const uint16_t *pixels = (const uint16_t *)color_data;
+        ESP_LOGI(TAG, "frame pixels: bg=%04X top=%04X middle=%04X bottom=%04X",
+                 (unsigned int)pixels[0], (unsigned int)pixels[42 * 240 + 120],
+                 (unsigned int)pixels[150 * 240 + 120], (unsigned int)pixels[257 * 240 + 120]);
+    }
+    if (draw_log_count < 3) {
+        ESP_LOGI(TAG, "draw %u: (%d,%d)-(%d,%d), %u bytes", (unsigned int)(draw_log_count + 1),
+                 x_start, y_start, x_end, y_end, (unsigned int)len);
+        draw_log_count++;
+    }
     ESP_RETURN_ON_ERROR(tx_color(spd2010, io, LCD_CMD_RAMWR, color_data, len), TAG, "send color failed");
 
     return ESP_OK;
