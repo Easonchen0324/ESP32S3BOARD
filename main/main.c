@@ -118,7 +118,7 @@ void app_main(void)
         .io_handle = qspilcd_get_io_handle(),
         .panel_handle = qspilcd_get_panel_handle(),
         .control_handle = NULL,
-        .buffer_size = QSPILCD_H_RES * QSPILCD_V_RES,
+        .buffer_size = QSPILCD_H_RES * QSPILCD_DRAW_BUFF_HEIGHT,
         .double_buffer = false,
         .trans_size = 0,
         .hres = QSPILCD_H_RES,
@@ -136,7 +136,7 @@ void app_main(void)
             .buff_spiram = false,
             .sw_rotate = false,
             .swap_bytes = true,
-            .full_refresh = true,
+            .full_refresh = false,
             .direct_mode = false,
         },
     };
