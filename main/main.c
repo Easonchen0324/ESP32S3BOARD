@@ -29,7 +29,13 @@
 #include "lv_demos.h"
 #include "esp_lvgl_port.h"
 #include "esp_log.h"
+#include "gui_guider.h"
+#include "events_init.h"
+#include "custom.h"
 #include <stdio.h>
+
+
+lv_ui guider_ui;
 
 
 static void touchpad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
@@ -74,19 +80,6 @@ static void touchpad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     else
     {
         data->state = LV_INDEV_STATE_RELEASED;
-    }
-}
-
-
-static void touch_button_event_cb(lv_event_t *event)
-{
-    if (lv_event_get_code(event) == LV_EVENT_CLICKED)
-    {
-        lv_obj_t *button = lv_event_get_target_obj(event);
-        lv_obj_t *label = lv_event_get_user_data(event);
-        lv_label_set_text(label, "TOUCH OK!");
-        lv_obj_set_style_bg_color(button, lv_color_hex(0x20B26B), 0);
-        ESP_LOGI("main", "Touch button clicked");
     }
 }
 
@@ -173,44 +166,15 @@ void app_main(void)
     ESP_LOGI("main", "Waiting for LVGL lock");
     lvgl_port_lock(0);
     ESP_LOGI("main", "LVGL lock acquired");
-    // lv_demo_widgets();  /* 暂时替换为全屏绘制验证界面 */
-    lv_obj_t *screen = lv_screen_active();
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0x1B2735), 0);
-
-    lv_obj_t *top_block = lv_obj_create(screen);
-    lv_obj_set_size(top_block, 200, 55);
-    lv_obj_align(top_block, LV_ALIGN_TOP_MID, 0, 15);
-    lv_obj_set_style_bg_color(top_block, lv_color_hex(0x007ACC), 0);
-    lv_obj_set_style_bg_opa(top_block, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(top_block, 0, 0);
-    lv_obj_t *top_label = lv_label_create(top_block);
-    lv_label_set_text(top_label, "TOP: SPI LCD OK");
-    lv_obj_set_style_text_color(top_label, lv_color_white(), 0);
-    lv_obj_center(top_label);
-
-    lv_obj_t *touch_button = lv_button_create(screen);
-    lv_obj_set_size(touch_button, 150, 90);
-    lv_obj_align(touch_button, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(touch_button, lv_color_hex(0xE39B25), 0);
-    lv_obj_set_style_bg_opa(touch_button, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(touch_button, 0, 0);
-    lv_obj_t *touch_label = lv_label_create(touch_button);
-    lv_label_set_text(touch_label, "TOUCH TEST");
-    lv_obj_set_style_text_color(touch_label, lv_color_white(), 0);
-    lv_obj_center(touch_label);
-    lv_obj_add_event_cb(touch_button, touch_button_event_cb, LV_EVENT_CLICKED, touch_label);
-
-    lv_obj_t *bottom_block = lv_obj_create(screen);
-    lv_obj_set_size(bottom_block, 200, 55);
-    lv_obj_align(bottom_block, LV_ALIGN_BOTTOM_MID, 0, -15);
-    lv_obj_set_style_bg_color(bottom_block, lv_color_hex(0xE75A3C), 0);
-    lv_obj_set_style_bg_opa(bottom_block, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(bottom_block, 0, 0);
-    lv_obj_t *bottom_label = lv_label_create(bottom_block);
-    lv_label_set_text(bottom_label, "BOTTOM: 240x300");
-    lv_obj_set_style_text_color(bottom_label, lv_color_white(), 0);
-    lv_obj_center(bottom_label);
-    ESP_LOGI("main", "Test UI created");
+    setup_bottom_layer();
+    init_scr_del_flag(&guider_ui);
+    init_keyboard(&guider_ui);
+    setup_scr_main_screen(&guider_ui);
+    guider_ui.main_screen_del = false;
+    lv_screen_load(guider_ui.main_screen);
+    events_init(&guider_ui);
+    custom_init(&guider_ui);
+    ESP_LOGI("main", "GUI Guider UI created");
     lvgl_port_unlock();
     ESP_LOGI("main", "LVGL lock released");
 
