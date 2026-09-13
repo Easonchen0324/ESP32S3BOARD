@@ -25,13 +25,13 @@ void setup_scr_screen_1(lv_ui *ui)
 
     //Write style for screen_1, Part: LV_PART_MAIN, State: LV_STATE_DEFAULT.
     lv_obj_set_style_bg_opa(ui->screen_1, 255, LV_PART_MAIN|LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(ui->screen_1, lv_color_hex(0x00ff08), LV_PART_MAIN|LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(ui->screen_1, lv_color_hex(0x000000), LV_PART_MAIN|LV_STATE_DEFAULT);
     lv_obj_set_style_bg_grad_dir(ui->screen_1, LV_GRAD_DIR_NONE, LV_PART_MAIN|LV_STATE_DEFAULT);
 
     //Write codes screen_1_slider_1
     ui->screen_1_slider_1 = lv_slider_create(ui->screen_1);
     lv_obj_set_pos(ui->screen_1_slider_1, 40, 146);
-    lv_obj_set_size(ui->screen_1_slider_1, 160, 8);
+    lv_obj_set_size(ui->screen_1_slider_1, 160, 10);
     lv_slider_set_range(ui->screen_1_slider_1, 0, 100);
     lv_slider_set_mode(ui->screen_1_slider_1, LV_SLIDER_MODE_NORMAL);
     lv_slider_set_value(ui->screen_1_slider_1, 50, LV_ANIM_OFF);
