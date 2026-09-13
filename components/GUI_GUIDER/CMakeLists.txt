@@ -13,5 +13,5 @@ idf_component_register(
         "generated"
         "generated/guider_fonts"
         "custom"
-    REQUIRES lvgl
+    REQUIRES lvgl WIFI_MANAGER
 )

@@ -29,6 +29,7 @@
 #include "lv_demos.h"
 #include "esp_lvgl_port.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "gui_guider.h"
 #include "events_init.h"
 #include "custom.h"
@@ -99,6 +100,8 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_erase());
         ESP_ERROR_CHECK(nvs_flash_init());
     }
+
+    ESP_ERROR_CHECK(esp_netif_init());       /* 在启动早期初始化TCP/IP协议栈 */
 
     led_init();                 /* LED初始化 */
 

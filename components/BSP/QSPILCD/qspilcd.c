@@ -16,7 +16,6 @@
 #define QSPILCD_PIN_CS            GPIO_NUM_16
 #define QSPILCD_PIN_DATA0         GPIO_NUM_15
 #define QSPILCD_PIN_DC            GPIO_NUM_7
-#define QSPILCD_PIN_BACKLIGHT     GPIO_NUM_35
 
 #define QSPILCD_TOUCH_PORT        I2C_NUM_1
 #define QSPILCD_TOUCH_PIN_SCL     GPIO_NUM_5
@@ -30,13 +29,6 @@ static esp_lcd_touch_handle_t s_touch_handle;
 
 esp_err_t qspilcd_init(void)
 {
-    const gpio_config_t backlight_config = {
-        .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = 1ULL << QSPILCD_PIN_BACKLIGHT,
-    };
-    ESP_RETURN_ON_ERROR(gpio_config(&backlight_config), TAG, "configure backlight failed");
-    ESP_RETURN_ON_ERROR(gpio_set_level(QSPILCD_PIN_BACKLIGHT, 0), TAG, "turn off backlight failed");
-
     const spi_bus_config_t bus_config = SPD2010_PANEL_BUS_SPI_CONFIG(
         QSPILCD_PIN_PCLK, QSPILCD_PIN_DATA0,
         QSPILCD_H_RES * QSPILCD_V_RES * sizeof(uint16_t));
@@ -59,7 +51,7 @@ esp_err_t qspilcd_init(void)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel_handle), TAG, "reset panel failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel_handle), TAG, "initialize panel failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel_handle, true), TAG, "turn on panel failed");
-    return gpio_set_level(QSPILCD_PIN_BACKLIGHT, 1);
+    return ESP_OK;
 }
 
 esp_err_t qspilcd_touch_init(void)
