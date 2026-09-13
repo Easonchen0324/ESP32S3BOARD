@@ -16,6 +16,7 @@ set(include_dirs
 
 set(requires
             driver
+            fatfs
             esp_lcd
             esp_lcd_touch
             esp_lcd_touch_ft5x06)

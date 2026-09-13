@@ -19,10 +19,13 @@
  */
 
 #include "my_spi.h"
+#include "esp_log.h"
+#include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
+#include <stdio.h>
 
-
-/* SD卡设备句柄 */
-spi_device_handle_t MY_SD_Handle = NULL;
+static const char *TAG = "my_spi";
+static sdmmc_card_t *s_sd_card;
 
 /**
  * @brief       spi初始化
@@ -31,6 +34,7 @@ spi_device_handle_t MY_SD_Handle = NULL;
  */
 esp_err_t my_spi_init(void)
 {
+    esp_err_t ret;
     spi_bus_config_t buscfg = {
         .sclk_io_num     = SPI_SCLK_PIN,    /* 时钟引脚 */
         .mosi_io_num     = SPI_MOSI_PIN,    /* 主机输出从机输入引脚 */
@@ -40,18 +44,39 @@ esp_err_t my_spi_init(void)
         .max_transfer_sz = 320 * 240 * sizeof(uint16_t),   /* 最大传输大小(整屏(RGB565格式)) */
     };
     /* 初始化SPI总线 */
-    ESP_ERROR_CHECK(spi_bus_initialize(MY_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    ret = spi_bus_initialize(MY_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "SPI bus initialization failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
-    /* SPI驱动接口配置,SPISD卡时钟是20-25MHz */
-    spi_device_interface_config_t devcfg = {
-        .clock_speed_hz = 20 * 1000 * 1000, /* SPI时钟 */
-        .mode = 0,                          /* SPI模式0 */
-        .spics_io_num = SD_CS_PIN,          /* 片选引脚 */
-        .queue_size = 7,                    /* 事务队列尺寸 7个 */
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.slot = MY_SPI_HOST;
+
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_config.gpio_cs = SD_CS_PIN;
+    slot_config.host_id = host.slot;
+
+    esp_vfs_fat_mount_config_t mount_config = {
+        .format_if_mount_failed = false,
+        .max_files = 8,
+        .allocation_unit_size = 16 * 1024,
+        .disk_status_check_enable = false,
+        .use_one_fat = false,
     };
 
-    /* 添加SPI总线设备 */
-    ESP_ERROR_CHECK(spi_bus_add_device(MY_SPI_HOST, &devcfg, &MY_SD_Handle));
+    ret = esp_vfs_fat_sdspi_mount(SD_MOUNT_POINT, &host, &slot_config,
+                                  &mount_config, &s_sd_card);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "SD card mount failed: %s", esp_err_to_name(ret));
+        spi_bus_free(MY_SPI_HOST);
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "SD card mounted at %s", SD_MOUNT_POINT);
+    sdmmc_card_print_info(stdout, s_sd_card);
 
     return ESP_OK;
 }

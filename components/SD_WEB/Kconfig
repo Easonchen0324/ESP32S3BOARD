@@ -1,0 +1,15 @@
+menu "SD Web File Manager"
+
+config SD_WEB_WIFI_SSID
+    string "Wi-Fi SSID"
+    default "HUAWEI-2L"
+    help
+        SSID of the router used by the SD card web file manager.
+
+config SD_WEB_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default "88888888"
+    help
+        Password of the router. Leave empty for an open network.
+
+endmenu

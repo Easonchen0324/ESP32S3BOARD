@@ -21,7 +21,7 @@
 #define QSPILCD_TOUCH_PORT        I2C_NUM_1
 #define QSPILCD_TOUCH_PIN_SCL     GPIO_NUM_5
 #define QSPILCD_TOUCH_PIN_SDA     GPIO_NUM_4
-#define QSPILCD_TOUCH_FREQ_HZ     100000
+#define QSPILCD_TOUCH_FREQ_HZ     400000
 
 static const char *TAG = "qspilcd";
 static esp_lcd_panel_io_handle_t s_lcd_io_handle;

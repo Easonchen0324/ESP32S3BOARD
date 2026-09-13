@@ -32,6 +32,7 @@
 #include "gui_guider.h"
 #include "events_init.h"
 #include "custom.h"
+#include "sd_web_server.h"
 #include <stdio.h>
 
 
@@ -100,7 +101,31 @@ void app_main(void)
     }
 
     led_init();                 /* LED初始化 */
-    my_spi_init();              /* SPI初始化 */
+
+#if 0                           /* 暂时禁用SD卡初始化 */
+    vTaskDelay(pdMS_TO_TICKS(500));         /* 等待SD卡上电稳定 */
+    esp_err_t sd_ret = ESP_FAIL;
+    for (int attempt = 1; attempt <= 5; attempt++)
+    {
+        sd_ret = my_spi_init();             /* SD卡SPI初始化并挂载FAT文件系统 */
+        if (sd_ret == ESP_OK)
+        {
+            break;
+        }
+
+        ESP_LOGW("main", "SD card initialization attempt %d/5 failed: %s",
+                 attempt, esp_err_to_name(sd_ret));
+        if (attempt < 5)
+        {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+    if (sd_ret != ESP_OK)
+    {
+        ESP_LOGE("main", "SD card initialization failed: %s; continue without SD web",
+                 esp_err_to_name(sd_ret));
+    }
+#endif
     myiic_init();               /* IIC初始化 */  
     xl9555_init();              /* 初始化按键 */
     esp_err_t touch_ret = qspilcd_touch_init();   /* 触摸初始化 */
@@ -110,7 +135,8 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(qspilcd_init());        /* SPI LCD初始化 */
 
-    const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    lvgl_cfg.task_affinity = 1;
     ESP_ERROR_CHECK(lvgl_port_init(&lvgl_cfg));
     ESP_LOGI("main", "LVGL port initialized");
 
@@ -177,6 +203,19 @@ void app_main(void)
     ESP_LOGI("main", "GUI Guider UI created");
     lvgl_port_unlock();
     ESP_LOGI("main", "LVGL lock released");
+
+#if 0                           /* 暂时禁用SD卡网络文件服务 */
+    if (sd_ret == ESP_OK)
+    {
+        vTaskDelay(pdMS_TO_TICKS(300));      /* 等待首次界面刷新完成后再启动网络 */
+        esp_err_t web_ret = sd_web_start(SD_MOUNT_POINT);
+        if (web_ret != ESP_OK)
+        {
+            ESP_LOGE("main", "SD web initialization failed: %s; continue without SD web",
+                     esp_err_to_name(web_ret));
+        }
+    }
+#endif
 
     while (1)
     {
