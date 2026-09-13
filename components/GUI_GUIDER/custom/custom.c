@@ -105,6 +105,7 @@ static void wifi_provision_task(void *argument)
 static void status_timer_cb(lv_timer_t *timer)
 {
     static bool icon_visible = true;
+    static bool time_colon_visible = true;
     static uint32_t elapsed_ms;
     lv_ui *ui = lv_timer_get_user_data(timer);
 
@@ -134,6 +135,7 @@ static void status_timer_cb(lv_timer_t *timer)
     char time_text[6];
     time(&now);
     localtime_r(&now, &local_time);
-    strftime(time_text, sizeof(time_text), "%H:%M", &local_time);
+    strftime(time_text, sizeof(time_text), time_colon_visible ? "%H:%M" : "%H %M", &local_time);
     lv_label_set_text(ui->main_screen_time, time_text);
+    time_colon_visible = !time_colon_visible;
 }

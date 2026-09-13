@@ -30,6 +30,7 @@
 #include "esp_lvgl_port.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "wifi_manager.h"
 #include "gui_guider.h"
 #include "events_init.h"
 #include "custom.h"
@@ -102,6 +103,12 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK(esp_netif_init());       /* 在启动早期初始化TCP/IP协议栈 */
+
+    ret = wifi_manager_start_saved_connection();
+    if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND)
+    {
+        ESP_LOGE("main", "Saved Wi-Fi connection start failed: %s", esp_err_to_name(ret));
+    }
 
     led_init();                 /* LED初始化 */
 
