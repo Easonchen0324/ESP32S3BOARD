@@ -22,7 +22,8 @@ typedef struct
 	lv_obj_t *main_screen;
 	bool main_screen_del;
 	lv_obj_t *main_screen_time;
-	lv_obj_t *main_screen_wifi;
+	lv_obj_t *main_screen_weather;
+	lv_obj_t *main_screen_day;
 	lv_obj_t *screen_1;
 	bool screen_1_del;
 	lv_obj_t *screen_1_slider_1;
@@ -55,10 +56,16 @@ extern lv_ui guider_ui;
 
 void setup_scr_main_screen(lv_ui *ui);
 void setup_scr_screen_1(lv_ui *ui);
-LV_IMAGE_DECLARE(_wifi_RGB565A8_48x48);
+LV_IMAGE_DECLARE(weather_cloudy);
+LV_IMAGE_DECLARE(weather_fog);
+LV_IMAGE_DECLARE(weather_overcast);
+LV_IMAGE_DECLARE(weather_snow);
+LV_IMAGE_DECLARE(weather_sunny);
+LV_IMAGE_DECLARE(weather_thunderstorm);
 
 LV_FONT_DECLARE(lv_font_montserratMedium_40)
 LV_FONT_DECLARE(lv_font_montserratMedium_16)
+LV_FONT_DECLARE(lv_font_montserratMedium_15)
 
 
 #ifdef __cplusplus

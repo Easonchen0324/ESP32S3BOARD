@@ -6,12 +6,18 @@ idf_component_register(
         "generated/events_init.c"
         "generated/widgets_init.c"
         "generated/guider_fonts/lv_font_montserratMedium_16.c"
+        "generated/guider_fonts/lv_font_montserratMedium_15.c"
         "generated/guider_fonts/lv_font_montserratMedium_40.c"
-        "generated/images/_wifi_RGB565A8_48x48.c"
+        "generated/images/weather_cloudy.c"
+        "generated/images/weather_fog.c"
+        "generated/images/weather_overcast.c"
+        "generated/images/weather_snow.c"
+        "generated/images/weather_sunny.c"
+        "generated/images/weather_thunderstorm.c"
         "custom/custom.c"
     INCLUDE_DIRS
         "generated"
         "generated/guider_fonts"
         "custom"
-    REQUIRES lvgl WIFI_MANAGER
+    REQUIRES lvgl WIFI_MANAGER esp_lvgl_port esp_http_client json mbedtls
 )

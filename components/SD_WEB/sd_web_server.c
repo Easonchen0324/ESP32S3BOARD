@@ -325,6 +325,8 @@ static esp_err_t upload_handler(httpd_req_t *req)
     FILE *file = fopen(temporary_path, "wb");
     if (file == NULL)
     {
+        ESP_LOGE(TAG, "Cannot create %s: errno=%d (%s)", temporary_path, errno,
+                 strerror(errno));
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot create file");
     }
 
@@ -507,20 +509,7 @@ static esp_err_t start_http_server(void)
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
-    {
-        esp_err_t ret = esp_wifi_connect();
-        if (ret != ESP_OK)
-        {
-            ESP_LOGE(TAG, "Wi-Fi connect request failed: %s", esp_err_to_name(ret));
-        }
-    }
-    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
-    {
-        ESP_LOGW(TAG, "Wi-Fi disconnected; reconnecting");
-        esp_wifi_connect();
-    }
-    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
         const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "SD file manager: http://" IPSTR "/", IP2STR(&event->ip_info.ip));
@@ -533,7 +522,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 
 esp_err_t sd_web_start(const char *base_path)
 {
-    ESP_LOGI(TAG, "SD web step 1: validate configuration");
     if (base_path == NULL || base_path[0] != '/' || strlen(base_path) >= sizeof(s_base_path))
     {
         return ESP_ERR_INVALID_ARG;
@@ -542,88 +530,27 @@ esp_err_t sd_web_start(const char *base_path)
     {
         return ESP_ERR_INVALID_STATE;
     }
-    if (CONFIG_SD_WEB_WIFI_SSID[0] == '\0')
-    {
-        ESP_LOGE(TAG, "Wi-Fi SSID is empty; configure it in menuconfig");
-        return ESP_ERR_INVALID_ARG;
-    }
-
     strlcpy(s_base_path, base_path, sizeof(s_base_path));
 
-    ESP_LOGI(TAG, "SD web step 2: initialize network interface");
-    esp_err_t ret = esp_netif_init();
+    esp_err_t ret = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                               wifi_event_handler, NULL);
     if (ret != ESP_OK)
     {
         return ret;
     }
-    ESP_LOGI(TAG, "SD web step 2 complete");
-
-    ESP_LOGI(TAG, "SD web step 3: create default event loop");
-    ret = esp_event_loop_create_default();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
-    {
-        return ret;
-    }
-    ESP_LOGI(TAG, "SD web step 3 complete");
-
-    ESP_LOGI(TAG, "SD web step 4: create Wi-Fi STA interface");
-    if (esp_netif_create_default_wifi_sta() == NULL)
-    {
-        return ESP_FAIL;
-    }
-    ESP_LOGI(TAG, "SD web step 4 complete");
-
-    ESP_LOGI(TAG, "SD web step 5: initialize Wi-Fi driver");
-    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
-    ret = esp_wifi_init(&init_config);
-    if (ret != ESP_OK)
-    {
-        return ret;
-    }
-    ESP_LOGI(TAG, "SD web step 5 complete");
-
-    ESP_LOGI(TAG, "SD web step 6: register Wi-Fi event handlers");
-    ret = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
-    if (ret != ESP_OK)
-    {
-        return ret;
-    }
-    ret = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
-    if (ret != ESP_OK)
-    {
-        return ret;
-    }
-    ESP_LOGI(TAG, "SD web step 6 complete");
-
-    wifi_config_t wifi_config = {0};
-    strlcpy((char *)wifi_config.sta.ssid, CONFIG_SD_WEB_WIFI_SSID,
-            sizeof(wifi_config.sta.ssid));
-    strlcpy((char *)wifi_config.sta.password, CONFIG_SD_WEB_WIFI_PASSWORD,
-            sizeof(wifi_config.sta.password));
-    wifi_config.sta.threshold.authmode = CONFIG_SD_WEB_WIFI_PASSWORD[0] == '\0'
-                                             ? WIFI_AUTH_OPEN
-                                             : WIFI_AUTH_WPA2_PSK;
-
-    ESP_LOGI(TAG, "SD web step 7: set Wi-Fi STA mode");
-    ret = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (ret == ESP_OK)
-    {
-        ESP_LOGI(TAG, "SD web step 7 complete; set Wi-Fi configuration");
-        ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-    }
-    if (ret == ESP_OK)
-    {
-        ESP_LOGI(TAG, "SD web step 8 complete; start Wi-Fi driver");
-        ret = esp_wifi_start();
-    }
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Wi-Fi initialization failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    ESP_LOGI(TAG, "SD web step 9: Wi-Fi driver started");
 
     s_wifi_started = true;
-    ESP_LOGI(TAG, "Connecting to Wi-Fi SSID: %s", CONFIG_SD_WEB_WIFI_SSID);
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK)
+    {
+        if (start_http_server() != ESP_OK)
+        {
+            ESP_LOGE(TAG, "SD file manager is unavailable");
+        }
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Waiting for Wi-Fi connection before starting SD file manager");
+    }
     return ESP_OK;
 }

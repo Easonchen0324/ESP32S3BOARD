@@ -10,13 +10,18 @@
 /*********************
  *      INCLUDES
  *********************/
-#include <stdio.h>
 #include <time.h>
+#include <stdio.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "custom.h"
+#include "cJSON.h"
+#include "esp_crt_bundle.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_lvgl_port.h"
 #include "wifi_manager.h"
 
 /*********************
@@ -30,112 +35,178 @@
 /**********************
  *  STATIC PROTOTYPES
  **********************/
-static void main_screen_wifi_event_cb(lv_event_t *event);
 static void status_timer_cb(lv_timer_t *timer);
-static void wifi_provision_task(void *argument);
-static void main_screen_gesture_event_cb(lv_event_t *event);
-static void screen_1_gesture_event_cb(lv_event_t *event);
+static void weather_update_task(void *argument);
+static esp_err_t weather_fetch_code(int *weather_code);
+static esp_err_t weather_http_event_handler(esp_http_client_event_t *event);
+static const lv_image_dsc_t *weather_icon_from_code(int weather_code, const char **icon_name);
 
-/**********************
- *  STATIC VARIABLES
- **********************/
-static TaskHandle_t s_wifi_task;
+#define WEATHER_URL "https://api.open-meteo.com/v1/forecast?latitude=24.4798&longitude=118.0894&current=weather_code&timezone=Asia%2FShanghai"
+#define WEATHER_RESPONSE_SIZE 512
+#define WEATHER_RETRY_MS 60000
+#define WEATHER_REFRESH_MS (30 * 60 * 1000)
+
+typedef struct {
+    char data[WEATHER_RESPONSE_SIZE];
+    size_t length;
+    bool overflow;
+} weather_response_t;
 
 /**
  * Create a demo application
  */
 void custom_init(lv_ui *ui)
 {
-    setup_scr_screen_1(ui);
-    ui->screen_1_del = false;
-
-    lv_obj_add_flag(ui->main_screen, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(ui->screen_1, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(ui->main_screen_wifi, LV_OBJ_FLAG_GESTURE_BUBBLE);
-    lv_obj_add_flag(ui->screen_1_slider_1, LV_OBJ_FLAG_GESTURE_BUBBLE);
-    lv_obj_add_event_cb(ui->main_screen, main_screen_gesture_event_cb, LV_EVENT_GESTURE, ui);
-    lv_obj_add_event_cb(ui->screen_1, screen_1_gesture_event_cb, LV_EVENT_GESTURE, ui);
-    lv_obj_add_event_cb(ui->main_screen_wifi, main_screen_wifi_event_cb, LV_EVENT_CLICKED, ui);
-    lv_timer_create(status_timer_cb, 250, ui);
-}
-
-static void main_screen_gesture_event_cb(lv_event_t *event)
-{
-    if (lv_indev_get_gesture_dir(lv_indev_active()) != LV_DIR_TOP)
+    lv_timer_create(status_timer_cb, 1000, ui);
+    if (xTaskCreate(weather_update_task, "weather", 6144, ui, 3, NULL) != pdPASS)
     {
-        return;
+        ESP_LOGE("ui", "Unable to create weather update task");
     }
-
-    lv_ui *ui = lv_event_get_user_data(event);
-    lv_screen_load_anim(ui->screen_1, LV_SCR_LOAD_ANIM_MOVE_TOP, 300, 0, false);
-}
-
-static void screen_1_gesture_event_cb(lv_event_t *event)
-{
-    if (lv_indev_get_gesture_dir(lv_indev_active()) != LV_DIR_TOP)
-    {
-        return;
-    }
-
-    lv_ui *ui = lv_event_get_user_data(event);
-    lv_screen_load_anim(ui->main_screen, LV_SCR_LOAD_ANIM_MOVE_TOP, 300, 0, false);
-}
-
-static void main_screen_wifi_event_cb(lv_event_t *event)
-{
-    if (s_wifi_task == NULL &&
-        xTaskCreatePinnedToCore(wifi_provision_task, "wifi_provision", 4096, NULL, 3,
-                                &s_wifi_task, 1) != pdPASS)
-    {
-        ESP_LOGE("ui", "Unable to create Wi-Fi provisioning task");
-    }
-}
-
-static void wifi_provision_task(void *argument)
-{
-    esp_err_t ret = wifi_manager_start_provisioning();
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE("ui", "Unable to start Wi-Fi provisioning: %s", esp_err_to_name(ret));
-    }
-    s_wifi_task = NULL;
-    vTaskDelete(NULL);
 }
 
 static void status_timer_cb(lv_timer_t *timer)
 {
-    static bool icon_visible = true;
-    static bool time_colon_visible = true;
-    static uint32_t elapsed_ms;
     lv_ui *ui = lv_timer_get_user_data(timer);
 
-    if (wifi_manager_is_provisioning())
-    {
-        icon_visible = !icon_visible;
-        lv_obj_set_style_image_opa(ui->main_screen_wifi,
-                                   icon_visible ? LV_OPA_COVER : LV_OPA_40,
-                                   LV_PART_MAIN | LV_STATE_DEFAULT);
-    }
-    else
-    {
-        icon_visible = true;
-        lv_obj_set_style_image_opa(ui->main_screen_wifi, LV_OPA_COVER,
-                                   LV_PART_MAIN | LV_STATE_DEFAULT);
-    }
-
-    elapsed_ms += 250;
-    if (elapsed_ms < 1000 || !wifi_manager_has_time())
+    if (!wifi_manager_has_time())
     {
         return;
     }
-    elapsed_ms = 0;
 
     time_t now;
     struct tm local_time;
     char time_text[6];
+    char date_text[32];
     time(&now);
     localtime_r(&now, &local_time);
-    strftime(time_text, sizeof(time_text), time_colon_visible ? "%H:%M" : "%H %M", &local_time);
+    strftime(time_text, sizeof(time_text), "%H:%M", &local_time);
+    strftime(date_text, sizeof(date_text), "%a %b %d", &local_time);
     lv_label_set_text(ui->main_screen_time, time_text);
-    time_colon_visible = !time_colon_visible;
+    lv_label_set_text(ui->main_screen_day, date_text);
+}
+
+static void weather_update_task(void *argument)
+{
+    lv_ui *ui = argument;
+
+    while (true)
+    {
+        int weather_code;
+        esp_err_t ret = weather_fetch_code(&weather_code);
+        if (ret == ESP_OK && lvgl_port_lock(0))
+        {
+            const char *icon_name;
+            const lv_image_dsc_t *icon = weather_icon_from_code(weather_code, &icon_name);
+            ESP_LOGI("ui", "Weather code=%d, icon=%s", weather_code, icon_name);
+            lv_image_set_src(ui->main_screen_weather, icon);
+            ESP_LOGI("ui", "Weather icon updated: %s", icon_name);
+            lvgl_port_unlock();
+        }
+        else if (ret != ESP_OK)
+        {
+            ESP_LOGW("ui", "Weather update failed: %s", esp_err_to_name(ret));
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(ret == ESP_OK ? WEATHER_REFRESH_MS : WEATHER_RETRY_MS));
+    }
+}
+
+static esp_err_t weather_fetch_code(int *weather_code)
+{
+    weather_response_t response = {0};
+    esp_http_client_config_t config = {
+        .url = WEATHER_URL,
+        .event_handler = weather_http_event_handler,
+        .user_data = &response,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 10000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = esp_http_client_perform(client);
+    int status_code = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    if (ret != ESP_OK)
+    {
+        return ret;
+    }
+    if (status_code != 200 || response.overflow)
+    {
+        return ESP_FAIL;
+    }
+
+    response.data[response.length] = '\0';
+    cJSON *root = cJSON_Parse(response.data);
+    cJSON *current = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "current");
+    cJSON *code = current == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(current, "weather_code");
+    if (!cJSON_IsNumber(code))
+    {
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    *weather_code = code->valueint;
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+static esp_err_t weather_http_event_handler(esp_http_client_event_t *event)
+{
+    if (event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0)
+    {
+        return ESP_OK;
+    }
+
+    weather_response_t *response = event->user_data;
+    if (response->length + event->data_len >= sizeof(response->data))
+    {
+        response->overflow = true;
+        return ESP_OK;
+    }
+
+    memcpy(response->data + response->length, event->data, event->data_len);
+    response->length += event->data_len;
+    return ESP_OK;
+}
+
+static const lv_image_dsc_t *weather_icon_from_code(int weather_code, const char **icon_name)
+{
+    *icon_name = "weather_cloudy";
+    if (weather_code == 0)
+    {
+        *icon_name = "weather_sunny";
+        return &weather_sunny;
+    }
+    if (weather_code == 1 || weather_code == 2)
+    {
+        *icon_name = "weather_cloudy";
+        return &weather_cloudy;
+    }
+    if (weather_code == 3)
+    {
+        *icon_name = "weather_overcast";
+        return &weather_overcast;
+    }
+    if (weather_code == 45 || weather_code == 48)
+    {
+        *icon_name = "weather_fog";
+        return &weather_fog;
+    }
+    if ((weather_code >= 71 && weather_code <= 77) || weather_code == 85 || weather_code == 86)
+    {
+        *icon_name = "weather_snow";
+        return &weather_snow;
+    }
+    if ((weather_code >= 51 && weather_code <= 67) ||
+        (weather_code >= 80 && weather_code <= 82) ||
+        (weather_code >= 95 && weather_code <= 99))
+    {
+        *icon_name = "weather_thunderstorm";
+        return &weather_thunderstorm;
+    }
+    return &weather_cloudy;
 }

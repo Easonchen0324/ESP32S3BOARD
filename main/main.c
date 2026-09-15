@@ -112,7 +112,6 @@ void app_main(void)
 
     led_init();                 /* LED初始化 */
 
-#if 0                           /* 暂时禁用SD卡初始化 */
     vTaskDelay(pdMS_TO_TICKS(500));         /* 等待SD卡上电稳定 */
     esp_err_t sd_ret = ESP_FAIL;
     for (int attempt = 1; attempt <= 5; attempt++)
@@ -135,7 +134,6 @@ void app_main(void)
         ESP_LOGE("main", "SD card initialization failed: %s; continue without SD web",
                  esp_err_to_name(sd_ret));
     }
-#endif
     myiic_init();               /* IIC初始化 */  
     xl9555_init();              /* 初始化按键 */
     esp_err_t touch_ret = qspilcd_touch_init();   /* 触摸初始化 */
