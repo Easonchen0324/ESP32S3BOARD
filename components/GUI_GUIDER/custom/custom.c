@@ -36,6 +36,7 @@
  *  STATIC PROTOTYPES
  **********************/
 static void status_timer_cb(lv_timer_t *timer);
+static void screen_swipe_event_cb(lv_event_t *event);
 static void weather_update_task(void *argument);
 static esp_err_t weather_fetch_code(int *weather_code);
 static esp_err_t weather_http_event_handler(esp_http_client_event_t *event);
@@ -45,6 +46,7 @@ static const lv_image_dsc_t *weather_icon_from_code(int weather_code, const char
 #define WEATHER_RESPONSE_SIZE 512
 #define WEATHER_RETRY_MS 60000
 #define WEATHER_REFRESH_MS (30 * 60 * 1000)
+#define SCREEN_SWITCH_ANIMATION_MS 300
 
 typedef struct {
     char data[WEATHER_RESPONSE_SIZE];
@@ -58,14 +60,50 @@ typedef struct {
 void custom_init(lv_ui *ui)
 {
     lv_timer_create(status_timer_cb, 1000, ui);
+
+    setup_scr_screen_1(ui);
+    ui->screen_1_del = false;
+
+    lv_obj_add_flag(ui->main_screen, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(ui->screen_1, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(ui->main_screen, screen_swipe_event_cb, LV_EVENT_GESTURE, ui);
+    lv_obj_add_event_cb(ui->screen_1, screen_swipe_event_cb, LV_EVENT_GESTURE, ui);
+
     if (xTaskCreate(weather_update_task, "weather", 6144, ui, 3, NULL) != pdPASS)
     {
         ESP_LOGE("ui", "Unable to create weather update task");
     }
 }
 
+static void screen_swipe_event_cb(lv_event_t *event)
+{
+    lv_ui *ui = lv_event_get_user_data(event);
+    lv_obj_t *screen = lv_event_get_current_target(event);
+    lv_indev_t *indev = lv_indev_active();
+
+    if (indev == NULL)
+    {
+        return;
+    }
+
+    lv_dir_t direction = lv_indev_get_gesture_dir(indev);
+    if (screen == ui->main_screen && direction == LV_DIR_TOP)
+    {
+        lv_indev_wait_release(indev);
+        lv_screen_load_anim(ui->screen_1, LV_SCREEN_LOAD_ANIM_MOVE_TOP,
+                            SCREEN_SWITCH_ANIMATION_MS, 0, false);
+    }
+    else if (screen == ui->screen_1 && direction == LV_DIR_BOTTOM)
+    {
+        lv_indev_wait_release(indev);
+        lv_screen_load_anim(ui->main_screen, LV_SCREEN_LOAD_ANIM_MOVE_BOTTOM,
+                            SCREEN_SWITCH_ANIMATION_MS, 0, false);
+    }
+}
+
 static void status_timer_cb(lv_timer_t *timer)
 {
+    static bool time_colon_visible = true;
     lv_ui *ui = lv_timer_get_user_data(timer);
 
     if (!wifi_manager_has_time())
@@ -79,10 +117,11 @@ static void status_timer_cb(lv_timer_t *timer)
     char date_text[32];
     time(&now);
     localtime_r(&now, &local_time);
-    strftime(time_text, sizeof(time_text), "%H:%M", &local_time);
+    strftime(time_text, sizeof(time_text), time_colon_visible ? "%H:%M" : "%H %M", &local_time);
     strftime(date_text, sizeof(date_text), "%a %b %d", &local_time);
     lv_label_set_text(ui->main_screen_time, time_text);
     lv_label_set_text(ui->main_screen_day, date_text);
+    time_colon_visible = !time_colon_visible;
 }
 
 static void weather_update_task(void *argument)

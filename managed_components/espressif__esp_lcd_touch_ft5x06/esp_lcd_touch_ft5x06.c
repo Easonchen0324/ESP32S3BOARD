@@ -293,7 +293,7 @@ static esp_err_t touch_ft5x06_init(esp_lcd_touch_handle_t tp)
     esp_err_t ret = ESP_OK;
 
     // Valid touching detect threshold
-    ret |= touch_ft5x06_i2c_write(tp, FT5x06_ID_G_THGROUP, 70);
+    ret |= touch_ft5x06_i2c_write(tp, FT5x06_ID_G_THGROUP, 40);
 
     // valid touching peak detect threshold
     ret |= touch_ft5x06_i2c_write(tp, FT5x06_ID_G_THPEAK, 60);

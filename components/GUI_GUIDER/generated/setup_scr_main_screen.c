@@ -67,7 +67,7 @@ void setup_scr_main_screen(lv_ui *ui)
     ui->main_screen_day = lv_label_create(ui->main_screen);
     lv_obj_set_pos(ui->main_screen_day, 70, 46);
     lv_obj_set_size(ui->main_screen_day, 100, 32);
-    lv_label_set_text(ui->main_screen_day, "星期二 9月15日");
+    lv_label_set_text(ui->main_screen_day, "Tue Sep 15");
     lv_label_set_long_mode(ui->main_screen_day, LV_LABEL_LONG_WRAP);
 
     //Write style for main_screen_day, Part: LV_PART_MAIN, State: LV_STATE_DEFAULT.
