@@ -11,6 +11,7 @@
  *      INCLUDES
  *********************/
 #include <time.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -23,6 +24,7 @@
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
 #include "wifi_manager.h"
+#include "wifi_ota.h"
 
 /*********************
  *      DEFINES
@@ -37,6 +39,9 @@
  **********************/
 static void status_timer_cb(lv_timer_t *timer);
 static void screen_swipe_event_cb(lv_event_t *event);
+static void network_button_event_cb(lv_event_t *event);
+static void back_button_event_cb(lv_event_t *event);
+static void network_action_task(void *argument);
 static void weather_update_task(void *argument);
 static esp_err_t weather_fetch_code(int *weather_code);
 static esp_err_t weather_http_event_handler(esp_http_client_event_t *event);
@@ -47,6 +52,18 @@ static const lv_image_dsc_t *weather_icon_from_code(int weather_code, const char
 #define WEATHER_RETRY_MS 60000
 #define WEATHER_REFRESH_MS (30 * 60 * 1000)
 #define SCREEN_SWITCH_ANIMATION_MS 300
+#define NETWORK_ACTION_TASK_STACK_SIZE 6144
+
+/** @brief 界面按钮对应的网络操作，枚举值会作为 FreeRTOS 任务参数传递。 */
+typedef enum {
+    UI_NETWORK_ACTION_AP = 1,
+    UI_NETWORK_ACTION_BLE,
+    UI_NETWORK_ACTION_SMARTCONFIG,
+    UI_NETWORK_ACTION_OTA,
+} ui_network_action_t;
+
+/* 防止用户连续点击时重复创建多个网络启动任务。 */
+static volatile bool s_network_action_running;
 
 typedef struct {
     char data[WEATHER_RESPONSE_SIZE];
@@ -69,10 +86,123 @@ void custom_init(lv_ui *ui)
     lv_obj_add_event_cb(ui->main_screen, screen_swipe_event_cb, LV_EVENT_GESTURE, ui);
     lv_obj_add_event_cb(ui->screen_1, screen_swipe_event_cb, LV_EVENT_GESTURE, ui);
 
+    /* 四个网络按钮共用一个回调，通过当前控件判断要执行的功能。 */
+    lv_obj_add_event_cb(ui->screen_1_btn_1, network_button_event_cb, LV_EVENT_CLICKED, ui);
+    lv_obj_add_event_cb(ui->screen_1_btn_2, network_button_event_cb, LV_EVENT_CLICKED, ui);
+    lv_obj_add_event_cb(ui->screen_1_btn_3, network_button_event_cb, LV_EVENT_CLICKED, ui);
+    lv_obj_add_event_cb(ui->screen_1_btn_4, network_button_event_cb, LV_EVENT_CLICKED, ui);
+    lv_obj_add_event_cb(ui->screen_1_btn_5, back_button_event_cb, LV_EVENT_CLICKED, ui);
+
     if (xTaskCreate(weather_update_task, "weather", 6144, ui, 3, NULL) != pdPASS)
     {
         ESP_LOGE("ui", "Unable to create weather update task");
     }
+}
+
+/**
+ * @brief 网络功能按钮事件。
+ *
+ * AP 扫描等操作可能持续一段时间，因此这里只创建后台任务，不直接阻塞 LVGL 线程。
+ */
+static void network_button_event_cb(lv_event_t *event)
+{
+    lv_ui *ui = lv_event_get_user_data(event);
+    lv_obj_t *button = lv_event_get_current_target(event);
+    ui_network_action_t action;
+
+    if (button == ui->screen_1_btn_1)
+    {
+        action = UI_NETWORK_ACTION_AP;
+    }
+    else if (button == ui->screen_1_btn_2)
+    {
+        action = UI_NETWORK_ACTION_BLE;
+    }
+    else if (button == ui->screen_1_btn_3)
+    {
+        action = UI_NETWORK_ACTION_SMARTCONFIG;
+    }
+    else if (button == ui->screen_1_btn_4)
+    {
+        action = UI_NETWORK_ACTION_OTA;
+    }
+    else
+    {
+        return;
+    }
+
+    if (s_network_action_running)
+    {
+        ESP_LOGW("ui", "Network action is already starting, ignore repeated click");
+        return;
+    }
+
+    s_network_action_running = true;
+    if (xTaskCreate(network_action_task, "ui_network", NETWORK_ACTION_TASK_STACK_SIZE,
+                    (void *)(intptr_t)action, 4, NULL) != pdPASS)
+    {
+        s_network_action_running = false;
+        ESP_LOGE("ui", "Unable to create network action task");
+    }
+}
+
+/** @brief Back 按钮只负责返回主界面，不停止已经启动的网络服务。 */
+static void back_button_event_cb(lv_event_t *event)
+{
+    lv_ui *ui = lv_event_get_user_data(event);
+    lv_screen_load_anim(ui->main_screen, LV_SCREEN_LOAD_ANIM_MOVE_BOTTOM,
+                        SCREEN_SWITCH_ANIMATION_MS, 0, false);
+}
+
+/** @brief 在后台执行具体网络功能，完成启动后输出结果并自动退出任务。 */
+static void network_action_task(void *argument)
+{
+    ui_network_action_t action = (ui_network_action_t)(intptr_t)argument;
+    const char *action_name = "unknown";
+    esp_err_t ret = ESP_ERR_INVALID_ARG;
+
+    switch (action)
+    {
+        case UI_NETWORK_ACTION_AP:
+            action_name = "AP provisioning";
+            ret = wifi_manager_start_ap_provisioning();
+            break;
+
+        case UI_NETWORK_ACTION_BLE:
+            action_name = "BLE provisioning";
+            ret = wifi_manager_start_ble_provisioning();
+            break;
+
+        case UI_NETWORK_ACTION_SMARTCONFIG:
+            action_name = "SmartConfig provisioning";
+            ret = wifi_manager_start_smartconfig_provisioning();
+            break;
+
+        case UI_NETWORK_ACTION_OTA:
+            action_name = "Wi-Fi OTA";
+            /* OTA 依赖默认事件循环；即使暂无 Wi-Fi，也先注册获取 IP 后的启动事件。 */
+            ret = wifi_manager_init();
+            if (ret == ESP_OK)
+            {
+                ret = wifi_ota_start();
+            }
+            break;
+
+        default:
+            break;
+    }
+
+    if (ret == ESP_OK)
+    {
+        ESP_LOGI("ui", "%s started", action_name);
+    }
+    else
+    {
+        ESP_LOGE("ui", "%s start failed: %s", action_name, esp_err_to_name(ret));
+    }
+
+    s_network_action_running = false;
+    vTaskDelete(NULL);
 }
 
 static void screen_swipe_event_cb(lv_event_t *event)

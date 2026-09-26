@@ -26,7 +26,16 @@ typedef struct
 	lv_obj_t *main_screen_day;
 	lv_obj_t *screen_1;
 	bool screen_1_del;
-	lv_obj_t *screen_1_slider_1;
+	lv_obj_t *screen_1_btn_1;
+	lv_obj_t *screen_1_btn_1_label;
+	lv_obj_t *screen_1_btn_2;
+	lv_obj_t *screen_1_btn_2_label;
+	lv_obj_t *screen_1_btn_3;
+	lv_obj_t *screen_1_btn_3_label;
+	lv_obj_t *screen_1_btn_4;
+	lv_obj_t *screen_1_btn_4_label;
+	lv_obj_t *screen_1_btn_5;
+	lv_obj_t *screen_1_btn_5_label;
 }lv_ui;
 
 typedef void (*ui_setup_scr_t)(lv_ui * ui);

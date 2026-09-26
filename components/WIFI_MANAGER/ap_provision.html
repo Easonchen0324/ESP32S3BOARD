@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>ESP32-S3 网络配置</title>
+  <style>
+    :root{color-scheme:dark;--bg:#07111f;--card:#101d31e8;--line:#ffffff18;--text:#f5f8ff;--muted:#9cacc4;--primary:#49a3ff;--primary2:#7357ff;--ok:#4ade80;--bad:#fb7185}
+    *{box-sizing:border-box}body{min-height:100vh;margin:0;padding:28px 16px;background:radial-gradient(circle at 15% 8%,#184c7e 0,transparent 32%),radial-gradient(circle at 90% 85%,#31256d 0,transparent 35%),var(--bg);font:15px/1.55 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;color:var(--text)}
+    .shell{width:min(100%,480px);margin:auto}.brand{display:flex;align-items:center;gap:14px;margin:12px 4px 22px}.logo{display:grid;place-items:center;width:48px;height:48px;border-radius:16px;background:linear-gradient(135deg,var(--primary),var(--primary2));box-shadow:0 12px 30px #287fd855;font-size:24px}.brand h1{font-size:20px;margin:0}.brand p{margin:2px 0 0;color:var(--muted);font-size:13px}
+    .card{padding:25px;border:1px solid var(--line);border-radius:24px;background:var(--card);box-shadow:0 24px 70px #0008;backdrop-filter:blur(18px)}.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:19px}.head h2{font-size:18px;margin:0}.pill{padding:6px 10px;border-radius:999px;background:#49a3ff18;color:#8bc7ff;font-size:12px}
+    label{display:block;margin:16px 0 7px;color:#c8d3e4;font-size:13px}.field{position:relative}select,input{width:100%;height:50px;border:1px solid #ffffff1f;border-radius:14px;background:#081322;color:var(--text);padding:0 14px;font-size:15px;outline:none;transition:.2s}select:focus,input:focus{border-color:var(--primary);box-shadow:0 0 0 4px #49a3ff18}.password input{padding-right:70px}.ghost{position:absolute;right:9px;top:8px;height:34px;border:0;border-radius:9px;background:#ffffff0d;color:#b9c5d7;padding:0 10px;cursor:pointer}
+    .row{display:flex;gap:10px}.row select{flex:1}.refresh{width:50px;height:50px;border:1px solid #ffffff1f;border-radius:14px;background:#ffffff0d;color:white;font-size:19px;cursor:pointer}.refresh.spin{animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+    .submit{width:100%;height:52px;margin-top:24px;border:0;border-radius:15px;background:linear-gradient(135deg,var(--primary),var(--primary2));color:white;font-size:16px;font-weight:700;cursor:pointer;box-shadow:0 12px 25px #3f7dea38}.submit:disabled{opacity:.55;cursor:wait}.status{display:none;margin-top:18px;padding:13px 14px;border:1px solid var(--line);border-radius:13px;background:#07111f;color:var(--muted);font-size:13px}.status.show{display:flex;gap:10px;align-items:center}.dot{width:8px;height:8px;border-radius:50%;background:var(--primary);box-shadow:0 0 0 5px #49a3ff18}.status.ok{color:var(--ok)}.status.ok .dot{background:var(--ok)}.status.bad{color:var(--bad)}.status.bad .dot{background:var(--bad)}
+    .tip{margin:18px 4px 0;color:var(--muted);font-size:12px;text-align:center}.meta{display:flex;justify-content:space-between;margin-top:17px;padding-top:17px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}@media(max-width:380px){.card{padding:20px}.meta{display:block}.meta span{display:block;margin-top:4px}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="brand"><div class="logo">⌁</div><div><h1>ESP32-S3 配网中心</h1><p>让设备连接到您的 2.4 GHz Wi‑Fi</p></div></header>
+    <section class="card">
+      <div class="head"><h2>网络设置</h2><span class="pill">AP 配网模式</span></div>
+      <form id="form">
+        <label for="ssid">附近的无线网络</label>
+        <div class="row"><select id="ssid" name="ssid" required><option value="">正在扫描...</option></select><button class="refresh" id="refresh" type="button" title="重新扫描">↻</button></div>
+        <label for="password">Wi‑Fi 密码</label>
+        <div class="field password"><input id="password" name="password" type="password" maxlength="64" autocomplete="current-password" placeholder="开放网络可留空"><button class="ghost" id="toggle" type="button">显示</button></div>
+        <button class="submit" id="submit" type="submit">保存并连接</button>
+      </form>
+      <div class="status" id="status"><span class="dot"></span><span id="statusText"></span></div>
+      <div class="meta"><span>热点：ESP_AP</span><span>管理地址：192.168.4.1</span></div>
+    </section>
+    <p class="tip">配置提交后热点会暂时断开，这是设备正在切换到路由器网络的正常现象。</p>
+  </main>
+  <script>
+    const $=id=>document.getElementById(id),ssid=$('ssid'),refresh=$('refresh'),status=$('status'),statusText=$('statusText');
+    function show(text,type=''){status.className='status show '+type;statusText.textContent=text}
+    function strength(rssi){return rssi>=-55?'信号很强':rssi>=-67?'信号良好':rssi>=-78?'信号一般':'信号较弱'}
+    async function scan(){refresh.classList.add('spin');ssid.disabled=true;ssid.innerHTML='<option value="">正在扫描...</option>';try{const res=await fetch('/api/scan',{cache:'no-store'}),data=await res.json();if(!res.ok)throw new Error(data.message||'扫描失败');ssid.innerHTML='<option value="">请选择 Wi‑Fi</option>';data.networks.forEach(n=>{const o=document.createElement('option');o.value=n.ssid;o.textContent=`${n.ssid} · ${strength(n.rssi)} (${n.rssi} dBm)`;ssid.appendChild(o)});if(!data.networks.length)show('没有扫描到网络，请靠近路由器后重试','bad')}catch(e){ssid.innerHTML='<option value="">扫描失败，请重试</option>';show(e.message,'bad')}finally{refresh.classList.remove('spin');ssid.disabled=false}}
+    refresh.onclick=scan;$('toggle').onclick=()=>{const p=$('password'),visible=p.type==='text';p.type=visible?'password':'text';$('toggle').textContent=visible?'显示':'隐藏'};
+    $('form').onsubmit=async e=>{e.preventDefault();const button=$('submit');button.disabled=true;button.textContent='正在提交...';show('正在把网络信息发送给 ESP32...');try{const body=new URLSearchParams(new FormData(e.target));const res=await fetch('/api/configure',{method:'POST',body,headers:{'Content-Type':'application/x-www-form-urlencoded'}});const data=await res.json();if(!res.ok)throw new Error(data.message||'配置失败');show('信息已保存，ESP32 正在连接路由器。','ok');button.textContent='已提交'}catch(err){show(err.message,'bad');button.disabled=false;button.textContent='重新提交'}};
+    scan();
+  </script>
+</body>
+</html>

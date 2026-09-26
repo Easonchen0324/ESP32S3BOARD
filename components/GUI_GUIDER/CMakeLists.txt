@@ -19,5 +19,5 @@ idf_component_register(
         "generated"
         "generated/guider_fonts"
         "custom"
-    REQUIRES lvgl WIFI_MANAGER esp_lvgl_port esp_http_client json mbedtls
+    REQUIRES lvgl WIFI_MANAGER WIFI_OTA esp_lvgl_port esp_http_client json mbedtls
 )

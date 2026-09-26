@@ -13,11 +13,15 @@
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_smartconfig.h"
 #include "esp_wifi.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 #include "nvs.h"
+#include "wifi_provisioning/manager.h"
+#include "wifi_provisioning/scheme_ble.h"
 
 #define WIFI_MANAGER_AP_SSID             "ESP_AP"
 #define WIFI_MANAGER_NVS_NAMESPACE       "wifi_config"
@@ -30,6 +34,15 @@
 #define WIFI_MANAGER_MAX_SCAN_RESULTS     12
 #define WIFI_MANAGER_DNS_PORT             53
 #define WIFI_MANAGER_DNS_PACKET_MAX_LEN   256
+#define WIFI_MANAGER_BLE_NAME_PREFIX      "PROV_"
+#define WIFI_MANAGER_BLE_POP              "esp32s3"
+
+typedef enum {
+    WIFI_PROVISIONING_NONE,
+    WIFI_PROVISIONING_AP,
+    WIFI_PROVISIONING_BLE,
+    WIFI_PROVISIONING_SMARTCONFIG,
+} wifi_provisioning_mode_t;
 
 typedef struct {
     char ssid[WIFI_MANAGER_SSID_MAX_LEN + 1];
@@ -44,6 +57,9 @@ static bool s_connecting;
 static bool s_connected;
 static bool s_provisioning;
 static bool s_sta_should_connect;
+static bool s_smartconfig_started;
+static bool s_ble_manager_initialized;
+static esp_netif_t *s_sta_netif;
 static esp_netif_t *s_ap_netif;
 static httpd_handle_t s_http_server;
 static TaskHandle_t s_apply_task;
@@ -53,6 +69,11 @@ static int s_dns_socket = -1;
 static wifi_credentials_t s_pending_credentials;
 static wifi_ap_record_t s_scan_results[WIFI_MANAGER_MAX_SCAN_RESULTS];
 static uint16_t s_scan_result_count;
+static wifi_provisioning_mode_t s_provisioning_mode;
+
+/* 链接器会把独立 HTML 文件嵌入固件，网页与 C 状态机可以分开维护。 */
+extern const uint8_t ap_provision_html_start[] asm("_binary_ap_provision_html_start");
+extern const uint8_t ap_provision_html_end[] asm("_binary_ap_provision_html_end");
 
 static void start_sntp(void);
 static void time_sync_notification_cb(struct timeval *timeval);
@@ -61,11 +82,18 @@ static esp_err_t start_http_server(void);
 static esp_err_t start_station(const wifi_credentials_t *credentials);
 static esp_err_t save_credentials(const wifi_credentials_t *credentials);
 static esp_err_t load_credentials(wifi_credentials_t *credentials);
+static void credentials_to_sta_config(const wifi_credentials_t *credentials, wifi_config_t *config);
 static void apply_credentials_task(void *argument);
 static void scan_available_networks(void);
 static esp_err_t start_dns_server(void);
 static void stop_dns_server(void);
 static void dns_server_task(void *argument);
+static void smartconfig_event_handler(void *arg, esp_event_base_t event_base,
+                                      int32_t event_id, void *event_data);
+static void ble_provisioning_event_handler(void *arg, esp_event_base_t event_base,
+                                           int32_t event_id, void *event_data);
+static esp_err_t start_smartconfig_service(void);
+static void stop_ap_services(void);
 
 static void start_sntp(void)
 {
@@ -126,7 +154,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        if (s_sta_should_connect) {
+        /* BLE manager 也可能启动 Wi-Fi，同步本地标志可避免后续重复调用 esp_wifi_start。 */
+        s_wifi_started = true;
+        if (s_provisioning_mode == WIFI_PROVISIONING_SMARTCONFIG && !s_smartconfig_started) {
+            esp_err_t ret = start_smartconfig_service();
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Start SmartConfig failed: %s", esp_err_to_name(ret));
+            }
+        } else if (s_sta_should_connect) {
             (void)esp_wifi_connect();
         }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -140,8 +175,107 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         s_connecting = false;
         s_connected = true;
         s_provisioning = false;
+        s_sta_should_connect = true;
         start_sntp();
         ESP_LOGI(TAG, "Wi-Fi connected");
+    }
+}
+
+static void smartconfig_event_handler(void *arg, esp_event_base_t event_base,
+                                      int32_t event_id, void *event_data)
+{
+    if (event_base != SC_EVENT || s_provisioning_mode != WIFI_PROVISIONING_SMARTCONFIG) {
+        return;
+    }
+
+    if (event_id == SC_EVENT_SCAN_DONE) {
+        ESP_LOGI(TAG, "SmartConfig scan completed");
+    } else if (event_id == SC_EVENT_FOUND_CHANNEL) {
+        ESP_LOGI(TAG, "SmartConfig channel found");
+    } else if (event_id == SC_EVENT_GOT_SSID_PSWD) {
+        const smartconfig_event_got_ssid_pswd_t *event = event_data;
+        wifi_credentials_t credentials = {0};
+
+        /* SmartConfig 字段长度是固定数组，显式补零后再保存，防止越界读取。 */
+        memcpy(credentials.ssid, event->ssid, WIFI_MANAGER_SSID_MAX_LEN);
+        memcpy(credentials.password, event->password, WIFI_MANAGER_PASSWORD_MAX_LEN);
+        esp_err_t ret = save_credentials(&credentials);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Save SmartConfig credentials failed: %s", esp_err_to_name(ret));
+            return;
+        }
+
+        wifi_config_t sta_config;
+        credentials_to_sta_config(&credentials, &sta_config);
+        sta_config.sta.bssid_set = event->bssid_set;
+        if (event->bssid_set) {
+            memcpy(sta_config.sta.bssid, event->bssid, sizeof(sta_config.sta.bssid));
+        }
+
+        s_sta_should_connect = true;
+        s_connecting = true;
+        (void)esp_wifi_disconnect();
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_connect());
+        ESP_LOGI(TAG, "SmartConfig credentials received; connecting to %s", credentials.ssid);
+    } else if (event_id == SC_EVENT_SEND_ACK_DONE) {
+        /* 手机已收到 ESP32 的确认包，此时才停止协议可避免手机端误判超时。 */
+        (void)esp_smartconfig_stop();
+        s_smartconfig_started = false;
+        s_provisioning = false;
+        s_provisioning_mode = WIFI_PROVISIONING_NONE;
+        ESP_LOGI(TAG, "SmartConfig completed");
+    }
+}
+
+static void ble_provisioning_event_handler(void *arg, esp_event_base_t event_base,
+                                           int32_t event_id, void *event_data)
+{
+    if (event_base != WIFI_PROV_EVENT) {
+        return;
+    }
+
+    switch (event_id) {
+    case WIFI_PROV_START:
+        ESP_LOGI(TAG, "BLE provisioning started, PoP: %s", WIFI_MANAGER_BLE_POP);
+        break;
+    case WIFI_PROV_CRED_RECV: {
+        const wifi_sta_config_t *sta = event_data;
+        wifi_credentials_t credentials = {0};
+        memcpy(credentials.ssid, sta->ssid, WIFI_MANAGER_SSID_MAX_LEN);
+        memcpy(credentials.password, sta->password, WIFI_MANAGER_PASSWORD_MAX_LEN);
+
+        /* 先暂存，等官方 manager 验证连接成功后再写 NVS，避免保存错误密码。 */
+        s_pending_credentials = credentials;
+        ESP_LOGI(TAG, "BLE credentials received for %s", credentials.ssid);
+        break;
+    }
+    case WIFI_PROV_CRED_FAIL:
+        s_connected = false;
+        ESP_LOGW(TAG, "BLE provisioning credentials rejected; waiting for retry");
+        break;
+    case WIFI_PROV_CRED_SUCCESS:
+        /* 官方 BLE manager 会暂时使用自身的 Wi-Fi NVS，这里同步到工程统一的命名空间。 */
+        if (save_credentials(&s_pending_credentials) != ESP_OK) {
+            ESP_LOGE(TAG, "Save verified BLE credentials failed");
+        }
+        s_sta_should_connect = true;
+        ESP_LOGI(TAG, "BLE provisioning succeeded");
+        break;
+    case WIFI_PROV_END:
+        /* Manager 自动停止后必须 deinit，释放 GATT、Protocomm 和配网状态机资源。 */
+        if (s_ble_manager_initialized) {
+            s_ble_manager_initialized = false;
+            wifi_prov_mgr_deinit();
+        }
+        /* BLE manager 临时切到 FLASH 存储，结束后恢复本工程统一使用的 RAM 配置。 */
+        (void)esp_wifi_set_storage(WIFI_STORAGE_RAM);
+        s_provisioning = false;
+        s_provisioning_mode = WIFI_PROVISIONING_NONE;
+        ESP_LOGI(TAG, "BLE provisioning stopped");
+        break;
+    default:
+        break;
     }
 }
 
@@ -212,7 +346,8 @@ esp_err_t wifi_manager_init(void)
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         return ret;
     }
-    if (esp_netif_create_default_wifi_sta() == NULL) {
+    s_sta_netif = esp_netif_create_default_wifi_sta();
+    if (s_sta_netif == NULL) {
         return ESP_FAIL;
     }
 
@@ -223,6 +358,11 @@ esp_err_t wifi_manager_init(void)
                         "register Wi-Fi event failed");
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL), TAG,
                         "register IP event failed");
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(SC_EVENT, ESP_EVENT_ANY_ID, smartconfig_event_handler, NULL), TAG,
+                        "register SmartConfig event failed");
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(WIFI_PROV_EVENT, ESP_EVENT_ANY_ID,
+                                                   ble_provisioning_event_handler, NULL), TAG,
+                        "register BLE provisioning event failed");
 
     s_initialized = true;
     return ESP_OK;
@@ -236,6 +376,7 @@ static esp_err_t start_station(const wifi_credentials_t *credentials)
     s_connected = false;
     s_connecting = true;
     s_sta_should_connect = true;
+    ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "set Wi-Fi RAM storage failed");
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "set STA mode failed");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &sta_config), TAG, "set STA configuration failed");
     if (!s_wifi_started) {
@@ -271,6 +412,9 @@ static bool url_decode(const char *source, char *destination, size_t destination
         if (value == '+') {
             value = ' ';
         } else if (value == '%') {
+            if (source[0] == '\0' || source[1] == '\0') {
+                return false;
+            }
             int high = hex_to_int(source[0]);
             int low = hex_to_int(source[1]);
             if (high < 0 || low < 0) {
@@ -323,19 +467,22 @@ static void scan_available_networks(void)
     s_scan_result_count = result_count;
 }
 
-static void html_escape_ssid(const uint8_t *ssid, char *escaped, size_t escaped_size)
+static size_t json_escape_ssid(const uint8_t *ssid, char *escaped, size_t escaped_size)
 {
     size_t written = 0;
     for (size_t index = 0; index < WIFI_MANAGER_SSID_MAX_LEN && ssid[index] != '\0'; index++) {
+        unsigned char value = ssid[index];
         const char *replacement = NULL;
-        switch (ssid[index]) {
-        case '&': replacement = "&amp;"; break;
-        case '<': replacement = "&lt;"; break;
-        case '>': replacement = "&gt;"; break;
-        case '\"': replacement = "&quot;"; break;
-        case '\'': replacement = "&#39;"; break;
-        default: break;
+        char unicode_escape[7];
+        if (value == '"') {
+            replacement = "\\\"";
+        } else if (value == '\\') {
+            replacement = "\\\\";
+        } else if (value < 0x20) {
+            snprintf(unicode_escape, sizeof(unicode_escape), "\\u%04x", value);
+            replacement = unicode_escape;
         }
+
         if (replacement != NULL) {
             size_t length = strlen(replacement);
             if (written + length >= escaped_size) {
@@ -343,51 +490,91 @@ static void html_escape_ssid(const uint8_t *ssid, char *escaped, size_t escaped_
             }
             memcpy(escaped + written, replacement, length);
             written += length;
-        } else if (ssid[index] >= 0x20 && written + 1 < escaped_size) {
-            escaped[written++] = (char)ssid[index];
+        } else if (written + 1 < escaped_size) {
+            escaped[written++] = (char)value;
         }
     }
     escaped[written] = '\0';
+    return written;
 }
 
 static esp_err_t root_get_handler(httpd_req_t *request)
 {
     httpd_resp_set_type(request, "text/html; charset=utf-8");
-    ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(request,
-                        "<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'>"
-                        "<title>ESP_AP 配网</title><style>body{margin:0;background:#f2f6fc;font-family:Arial,sans-serif;color:#172033}"
-                        ".card{max-width:360px;margin:8vh auto;padding:28px;background:#fff;border-radius:20px;box-shadow:0 10px 30px #ccd6e6}"
-                        "h2{margin:0 0 8px}p{color:#667085;font-size:14px}label{display:block;margin-top:18px;font-size:14px}"
-                        "select,input,button{box-sizing:border-box;width:100%;margin-top:7px;padding:13px;border-radius:10px;border:1px solid #d0d9e8;font-size:16px}"
-                        "button{border:0;background:#2563eb;color:white;font-weight:bold;margin-top:24px}.hint{font-size:12px;color:#8a94a6}</style></head>"
-                        "<body><main class=card><h2>连接 Wi-Fi</h2><p>请选择要连接的无线网络</p><form method=post action=/configure>"
-                        "<label>附近 Wi-Fi<select name=ssid required><option value=''>请选择 Wi-Fi</option>",
-                        HTTPD_RESP_USE_STRLEN), TAG, "send provisioning page failed");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, (const char *)ap_provision_html_start,
+                           ap_provision_html_end - ap_provision_html_start);
+}
 
+static esp_err_t scan_get_handler(httpd_req_t *request)
+{
+    scan_available_networks();
+    httpd_resp_set_type(request, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(request, "{\"networks\":[", HTTPD_RESP_USE_STRLEN),
+                        TAG, "send scan response failed");
+
+    bool first = true;
     for (uint16_t index = 0; index < s_scan_result_count; index++) {
         char escaped_ssid[WIFI_MANAGER_SSID_MAX_LEN * 6 + 1];
-        char option[WIFI_MANAGER_SSID_MAX_LEN * 12 + 64];
-        html_escape_ssid(s_scan_results[index].ssid, escaped_ssid, sizeof(escaped_ssid));
+        char item[sizeof(escaped_ssid) + 64];
+        json_escape_ssid(s_scan_results[index].ssid, escaped_ssid, sizeof(escaped_ssid));
         if (escaped_ssid[0] == '\0') {
             continue;
         }
-        snprintf(option, sizeof(option), "<option value=\"%s\">%s (%d dBm)</option>",
-                 escaped_ssid, escaped_ssid, s_scan_results[index].rssi);
-        ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(request, option, HTTPD_RESP_USE_STRLEN), TAG,
-                            "send Wi-Fi option failed");
+        snprintf(item, sizeof(item), "%s{\"ssid\":\"%s\",\"rssi\":%d,\"secure\":%s}",
+                 first ? "" : ",", escaped_ssid, s_scan_results[index].rssi,
+                 s_scan_results[index].authmode == WIFI_AUTH_OPEN ? "false" : "true");
+        first = false;
+        ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(request, item, HTTPD_RESP_USE_STRLEN), TAG,
+                            "send scan item failed");
+    }
+    ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(request, "]}", HTTPD_RESP_USE_STRLEN), TAG,
+                        "send scan response ending failed");
+
+    /*
+     * 分块响应必须再发送一个长度为 0 的结束块。
+     * 如果遗漏，浏览器会一直等待响应结束，网页就会持续显示“正在扫描”。
+     */
+    return httpd_resp_send_chunk(request, NULL, 0);
+}
+
+static esp_err_t status_get_handler(httpd_req_t *request)
+{
+    esp_netif_ip_info_t ip_info = {0};
+    const char *mode = s_provisioning_mode == WIFI_PROVISIONING_AP ? "ap" :
+                       s_provisioning_mode == WIFI_PROVISIONING_BLE ? "ble" :
+                       s_provisioning_mode == WIFI_PROVISIONING_SMARTCONFIG ? "smartconfig" : "idle";
+    if (s_sta_netif != NULL) {
+        (void)esp_netif_get_ip_info(s_sta_netif, &ip_info);
     }
 
-    return httpd_resp_send_chunk(request,
-        "</select></label><label>Wi-Fi 密码<input name=password type=password maxlength=64 placeholder='开放网络可留空'></label>"
-        "<button type=submit>保存并连接</button></form><p class=hint>列表仅显示附近的 2.4GHz Wi-Fi。</p></main></body></html>",
-        HTTPD_RESP_USE_STRLEN);
+    char response[192];
+    snprintf(response, sizeof(response),
+             "{\"mode\":\"%s\",\"provisioning\":%s,\"connecting\":%s,\"connected\":%s,"
+             "\"ip\":\"" IPSTR "\"}", mode, s_provisioning ? "true" : "false",
+             s_connecting ? "true" : "false", s_connected ? "true" : "false",
+             IP2STR(&ip_info.ip));
+    httpd_resp_set_type(request, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(request, response);
+}
+
+static esp_err_t send_json_message(httpd_req_t *request, const char *status,
+                                   const char *message, bool success)
+{
+    char response[160];
+    snprintf(response, sizeof(response), "{\"ok\":%s,\"message\":\"%s\"}",
+             success ? "true" : "false", message);
+    httpd_resp_set_status(request, status);
+    httpd_resp_set_type(request, "application/json; charset=utf-8");
+    return httpd_resp_sendstr(request, response);
 }
 
 static esp_err_t configure_post_handler(httpd_req_t *request)
 {
     if (request->content_len == 0 || request->content_len > WIFI_MANAGER_FORM_MAX_LEN) {
-        httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Invalid form data");
-        return ESP_FAIL;
+        return send_json_message(request, "400 Bad Request", "表单数据无效", false);
     }
 
     char form[WIFI_MANAGER_FORM_MAX_LEN + 1] = {0};
@@ -395,7 +582,7 @@ static esp_err_t configure_post_handler(httpd_req_t *request)
     while (received < request->content_len) {
         int ret = httpd_req_recv(request, form + received, request->content_len - received);
         if (ret <= 0) {
-            return ESP_FAIL;
+            return send_json_message(request, "400 Bad Request", "接收表单失败", false);
         }
         received += ret;
     }
@@ -406,30 +593,25 @@ static esp_err_t configure_post_handler(httpd_req_t *request)
     if (!form_get_value(form, "ssid", credentials.ssid, sizeof(credentials.ssid)) ||
         credentials.ssid[0] == '\0' ||
         !form_get_value(password_form, "password", credentials.password, sizeof(credentials.password))) {
-        httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Invalid Wi-Fi name or password");
-        return ESP_FAIL;
+        return send_json_message(request, "400 Bad Request", "Wi-Fi 名称或密码无效", false);
     }
     if (s_apply_task != NULL) {
-        httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Configuration is already being applied");
-        return ESP_FAIL;
+        return send_json_message(request, "409 Conflict", "正在应用上一份配置", false);
     }
 
     esp_err_t ret = save_credentials(&credentials);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Save Wi-Fi credentials failed: %s", esp_err_to_name(ret));
-        httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "Save failed");
-        return ret;
+        return send_json_message(request, "500 Internal Server Error", "保存配置失败", false);
     }
     s_pending_credentials = credentials;
     if (xTaskCreatePinnedToCore(apply_credentials_task, "wifi_apply", 4096, NULL, 3,
                                 &s_apply_task, 1) != pdPASS) {
         s_apply_task = NULL;
-        httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "Apply task failed");
-        return ESP_FAIL;
+        return send_json_message(request, "500 Internal Server Error", "创建连接任务失败", false);
     }
 
-    httpd_resp_set_type(request, "text/html; charset=utf-8");
-    return httpd_resp_sendstr(request, "<p>已保存，正在连接 Wi-Fi。</p>");
+    return send_json_message(request, "200 OK", "配置已保存，正在连接路由器", true);
 }
 
 static esp_err_t start_http_server(void)
@@ -443,21 +625,21 @@ static esp_err_t start_http_server(void)
     config.uri_match_fn = httpd_uri_match_wildcard;
     ESP_RETURN_ON_ERROR(httpd_start(&s_http_server, &config), TAG, "start provisioning server failed");
 
-    const httpd_uri_t root_uri = {
-        .uri = "/*",
-        .method = HTTP_GET,
-        .handler = root_get_handler,
-        .user_ctx = NULL,
+    /* 通配首页必须最后注册，否则它会先匹配并吞掉 /api 下的 GET 请求。 */
+    const httpd_uri_t handlers[] = {
+        {.uri = "/api/scan", .method = HTTP_GET, .handler = scan_get_handler},
+        {.uri = "/api/status", .method = HTTP_GET, .handler = status_get_handler},
+        {.uri = "/api/configure", .method = HTTP_POST, .handler = configure_post_handler},
+        {.uri = "/configure", .method = HTTP_POST, .handler = configure_post_handler},
+        {.uri = "/*", .method = HTTP_GET, .handler = root_get_handler},
     };
-    const httpd_uri_t configure_uri = {
-        .uri = "/configure",
-        .method = HTTP_POST,
-        .handler = configure_post_handler,
-        .user_ctx = NULL,
-    };
-    esp_err_t ret = httpd_register_uri_handler(s_http_server, &root_uri);
-    if (ret == ESP_OK) {
-        ret = httpd_register_uri_handler(s_http_server, &configure_uri);
+
+    esp_err_t ret = ESP_OK;
+    for (size_t index = 0; index < sizeof(handlers) / sizeof(handlers[0]); index++) {
+        ret = httpd_register_uri_handler(s_http_server, &handlers[index]);
+        if (ret != ESP_OK) {
+            break;
+        }
     }
     if (ret != ESP_OK) {
         httpd_stop(s_http_server);
@@ -533,8 +715,9 @@ static void dns_server_task(void *argument)
 
     if (s_dns_socket == socket_fd) {
         s_dns_socket = -1;
+        close(socket_fd);
     }
-    close(socket_fd);
+    /* 若 stop_dns_server 已关闭套接字，这里不能再次 close，避免误关复用后的文件描述符。 */
     s_dns_task = NULL;
     vTaskDelete(NULL);
 }
@@ -561,14 +744,21 @@ static void stop_dns_server(void)
     }
 }
 
-static void apply_credentials_task(void *argument)
+static void stop_ap_services(void)
 {
-    vTaskDelay(pdMS_TO_TICKS(300));
     stop_dns_server();
     if (s_http_server != NULL) {
         httpd_stop(s_http_server);
         s_http_server = NULL;
     }
+}
+
+static void apply_credentials_task(void *argument)
+{
+    vTaskDelay(pdMS_TO_TICKS(300));
+    stop_ap_services();
+    s_provisioning = false;
+    s_provisioning_mode = WIFI_PROVISIONING_NONE;
 
     esp_err_t ret = start_station(&s_pending_credentials);
     if (ret != ESP_OK) {
@@ -578,9 +768,12 @@ static void apply_credentials_task(void *argument)
     vTaskDelete(NULL);
 }
 
-esp_err_t wifi_manager_start_provisioning(void)
+esp_err_t wifi_manager_start_ap_provisioning(void)
 {
     ESP_RETURN_ON_ERROR(wifi_manager_init(), TAG, "initialize Wi-Fi manager failed");
+    if (s_provisioning) {
+        return s_provisioning_mode == WIFI_PROVISIONING_AP ? ESP_OK : ESP_ERR_INVALID_STATE;
+    }
 
     if (s_ap_netif == NULL) {
         s_ap_netif = esp_netif_create_default_wifi_ap();
@@ -597,6 +790,7 @@ esp_err_t wifi_manager_start_provisioning(void)
     ap_config.ap.authmode = WIFI_AUTH_OPEN;
 
     s_provisioning = true;
+    s_provisioning_mode = WIFI_PROVISIONING_AP;
     s_sta_should_connect = false;
     s_connecting = false;
     (void)esp_wifi_disconnect();
@@ -611,6 +805,136 @@ esp_err_t wifi_manager_start_provisioning(void)
     ESP_RETURN_ON_ERROR(start_dns_server(), TAG, "start captive DNS failed");
 
     ESP_LOGI(TAG, "Provisioning AP ready: %s, captive portal at http://192.168.4.1", WIFI_MANAGER_AP_SSID);
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_start_provisioning(void)
+{
+    /* 保留旧接口，已有业务代码无需修改即可继续启动 AP 配网。 */
+    return wifi_manager_start_ap_provisioning();
+}
+
+esp_err_t wifi_manager_start_ble_provisioning(void)
+{
+    ESP_RETURN_ON_ERROR(wifi_manager_init(), TAG, "initialize Wi-Fi manager failed");
+    if (s_provisioning || s_ble_manager_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    wifi_prov_mgr_config_t config = {
+        .scheme = wifi_prov_scheme_ble,
+        /* 不永久释放蓝牙内存，后续业务仍可再次进入 BLE 配网。 */
+        .scheme_event_handler = WIFI_PROV_EVENT_HANDLER_NONE,
+        .app_event_handler = WIFI_PROV_EVENT_HANDLER_NONE,
+    };
+    ESP_RETURN_ON_ERROR(wifi_prov_mgr_init(config), TAG, "initialize BLE provisioning failed");
+    s_ble_manager_initialized = true;
+
+    uint8_t mac[6];
+    char service_name[12];
+    esp_err_t ret = esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    if (ret != ESP_OK) {
+        wifi_prov_mgr_deinit();
+        s_ble_manager_initialized = false;
+        return ret;
+    }
+    snprintf(service_name, sizeof(service_name), WIFI_MANAGER_BLE_NAME_PREFIX "%02X%02X%02X",
+             mac[3], mac[4], mac[5]);
+
+    s_provisioning = true;
+    s_provisioning_mode = WIFI_PROVISIONING_BLE;
+    s_sta_should_connect = false;
+    s_connected = false;
+    s_connecting = false;
+    (void)esp_wifi_disconnect();
+
+    /* Security 1 使用 X25519 + AES-CTR，手机端需要输入下方 PoP。 */
+    ret = wifi_prov_mgr_start_provisioning(WIFI_PROV_SECURITY_1,
+                                           WIFI_MANAGER_BLE_POP,
+                                           service_name, NULL);
+    if (ret != ESP_OK) {
+        wifi_prov_mgr_deinit();
+        s_ble_manager_initialized = false;
+        s_provisioning = false;
+        s_provisioning_mode = WIFI_PROVISIONING_NONE;
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "BLE provisioning ready: name=%s, PoP=%s", service_name, WIFI_MANAGER_BLE_POP);
+    return ESP_OK;
+}
+
+static esp_err_t start_smartconfig_service(void)
+{
+    if (s_smartconfig_started) {
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(esp_smartconfig_set_type(SC_TYPE_ESPTOUCH_AIRKISS), TAG,
+                        "set SmartConfig protocol failed");
+    smartconfig_start_config_t config = SMARTCONFIG_START_CONFIG_DEFAULT();
+    ESP_RETURN_ON_ERROR(esp_smartconfig_start(&config), TAG, "start SmartConfig failed");
+    s_smartconfig_started = true;
+    ESP_LOGI(TAG, "SmartConfig is waiting for ESPTouch/AirKiss data");
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_start_smartconfig_provisioning(void)
+{
+    ESP_RETURN_ON_ERROR(wifi_manager_init(), TAG, "initialize Wi-Fi manager failed");
+    if (s_provisioning) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_provisioning = true;
+    s_provisioning_mode = WIFI_PROVISIONING_SMARTCONFIG;
+    s_sta_should_connect = false;
+    s_connected = false;
+    s_connecting = false;
+    (void)esp_wifi_disconnect();
+    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "set SmartConfig STA mode failed");
+
+    if (!s_wifi_started) {
+        esp_err_t ret = esp_wifi_start();
+        if (ret != ESP_OK) {
+            s_provisioning = false;
+            s_provisioning_mode = WIFI_PROVISIONING_NONE;
+            return ret;
+        }
+        s_wifi_started = true;
+        /* Wi-Fi START 事件到达后再启动 SmartConfig，避免底层尚未就绪。 */
+        return ESP_OK;
+    }
+
+    esp_err_t ret = start_smartconfig_service();
+    if (ret != ESP_OK) {
+        s_provisioning = false;
+        s_provisioning_mode = WIFI_PROVISIONING_NONE;
+    }
+    return ret;
+}
+
+esp_err_t wifi_manager_stop_provisioning(void)
+{
+    if (!s_provisioning && s_provisioning_mode == WIFI_PROVISIONING_NONE) {
+        return ESP_OK;
+    }
+
+    if (s_provisioning_mode == WIFI_PROVISIONING_AP) {
+        stop_ap_services();
+        (void)esp_wifi_set_mode(WIFI_MODE_STA);
+    } else if (s_provisioning_mode == WIFI_PROVISIONING_SMARTCONFIG) {
+        if (s_smartconfig_started) {
+            (void)esp_smartconfig_stop();
+            s_smartconfig_started = false;
+        }
+    } else if (s_provisioning_mode == WIFI_PROVISIONING_BLE && s_ble_manager_initialized) {
+        /* BLE stop 是异步的，WIFI_PROV_END 回调中再安全释放 manager。 */
+        wifi_prov_mgr_stop_provisioning();
+        return ESP_OK;
+    }
+
+    s_provisioning = false;
+    s_provisioning_mode = WIFI_PROVISIONING_NONE;
     return ESP_OK;
 }
 

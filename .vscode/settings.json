@@ -6,9 +6,8 @@
     ],
     "idf.toolsPathWin": "d:\\Soft_APP\\ESP_IDF\\tools",
     "files.autoGuessEncoding": true,
-    "idf.portWin": "COM5",
     "idf.flashType": "UART",
-    "idf.port": "/dev/ttyUSB0",
+    "idf.port": "COM5",
     "idf.espIdfPath": "/root/esp/v5.4/esp-idf",
     "idf.toolsPath": "/root/.espressif",
     "idf.currentSetup": "D:/Espressif53/Espressif/frameworks/esp-idf-v5.3.3/"

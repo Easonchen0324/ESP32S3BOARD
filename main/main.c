@@ -104,12 +104,6 @@ void app_main(void)
 
     ESP_ERROR_CHECK(esp_netif_init());       /* 在启动早期初始化TCP/IP协议栈 */
 
-    ret = wifi_manager_start_saved_connection();
-    if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND)
-    {
-        ESP_LOGE("main", "Saved Wi-Fi connection start failed: %s", esp_err_to_name(ret));
-    }
-
     led_init();                 /* LED初始化 */
 
     vTaskDelay(pdMS_TO_TICKS(500));         /* 等待SD卡上电稳定 */
@@ -176,6 +170,25 @@ void app_main(void)
     };
     lv_display_t *display = lvgl_port_add_disp(&display_cfg);
     ESP_LOGI("main", "LVGL display added: %p", (void *)display);
+    if (display == NULL)
+    {
+        /*
+         * 显示缓冲申请失败时不能继续创建主题和控件，否则 LVGL 会访问空显示对象并崩溃重启。
+         * 保持系统运行并输出错误，方便从串口直接定位内存问题。
+         */
+        ESP_LOGE("main", "LVGL display creation failed: insufficient contiguous DMA memory");
+        return;
+    }
+
+    /*
+     * 先为 LCD 保留连续 DMA 缓冲，再启动 Wi-Fi。
+     * Wi-Fi 会申请较多内部内存，提前启动可能导致显示缓冲没有足够的连续空间。
+     */
+    ret = wifi_manager_start_saved_connection();
+    if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND)
+    {
+        ESP_LOGE("main", "Saved Wi-Fi connection start failed: %s", esp_err_to_name(ret));
+    }
 
     if (touch_ret == ESP_OK)
     {

@@ -8,7 +8,11 @@
 
 #define QSPILCD_H_RES             240
 #define QSPILCD_V_RES             300
-#define QSPILCD_DRAW_BUFF_HEIGHT   80
+/*
+ * LVGL 绘图缓冲必须放在连续的内部 DMA 内存中。
+ * 40 行约占 19.2 KiB，既高于屏幕面积的 1/10，又能给 Wi-Fi 等组件留出足够内存。
+ */
+#define QSPILCD_DRAW_BUFF_HEIGHT   40
 
 esp_err_t qspilcd_init(void);
 esp_err_t qspilcd_touch_init(void);
